@@ -1,4 +1,4 @@
-#Go-LogScanner: High-Performance Distributed Log Analyzer
+# Go-LogScanner
 
 Go-LogScanner는 분산된 환경에서 발생하는 방대한 로그 데이터를 Goroutine과 Channel을 활용하여 병렬로 수집하고 실시간으로 분석하는 고성능 CLI 도구입니다. 대용량 파일 I/O 작업에서 Go의 동시성 모델이 가진 강점을 극대화하도록 설계되었습니다.
 💡 Key Features
@@ -66,3 +66,4 @@ Flags:
 👨‍💻 Intern Appeal: "Why Go?"
 
     "저는 대용량 데이터를 빠르고 안전하게 처리할 수 있는 Go의 특성을 깊이 이해하고 있습니다. 단순히 기능을 구현하는 것에 그치지 않고, Goroutine의 생명 주기 관리와 Channel을 통한 데이터 무결성 보장 등 효율적인 자원 활용에 집중하여 프로젝트를 설계했습니다."
+
