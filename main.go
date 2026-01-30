@@ -7,10 +7,12 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 )
 
 func main() {
 	path := flag.String("path", "./logs/*.log", "로그 파일 경로 (와일드카드 지원)")
+	keyword := flag.String("keyword", "ERROR", "검색할 키워드/정규식")
 	flag.Parse()
 
 	files, err := filepath.Glob(*path)
@@ -21,20 +23,67 @@ func main() {
 		log.Fatalf("로그 파일을 찾지 못했습니다: %s", *path)
 	}
 
-	var totalLines int64
+	re, err := regexp.Compile(*keyword)
+	if err != nil {
+		log.Fatalf("정규식 오류: %v", err)
+	}
 
-	fmt.Println("파일별 라인 수:")
+	var totalLines int64
+	var totalMatch int64
+
+	fmt.Printf("키워드/정규식: %s\n\n", *keyword)
+	fmt.Println("파일별 통계:")
+
 	for _, f := range files {
-		n, err := countLines(f)
+		lines, err := countLines(f)
 		if err != nil {
-			fmt.Printf("- %s: ERROR (%v)\n", f, err)
+			fmt.Printf("- %s: lines=ERROR (%v)\n", f, err)
 			continue
 		}
-		fmt.Printf("- %s: %d lines\n", f, n)
-		totalLines += n
+
+		matches, err := countMatches(f, re)
+		if err != nil {
+			fmt.Printf("- %s: matches=ERROR (%v)\n", f, err)
+			continue
+		}
+
+		fmt.Printf("- %s: lines=%d, matches=%d\n", f, lines, matches)
+		totalLines += lines
+		totalMatch += matches
 	}
 
 	fmt.Printf("\n총 라인 수: %d\n", totalLines)
+	fmt.Printf("총 매칭 수: %d\n", totalMatch)
+}
+
+func countMatches(path string, re *regexp.Regexp) (int64, error) {
+	file, err := os.Open(path)
+
+	if err != nil {
+		return 0, err
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+
+	const maxCapacity = 1024 * 1024 * 8
+	buf := make([]byte, 0, 64*1024)
+	scanner.Buffer(buf, maxCapacity)
+
+	var matches int64
+
+	for scanner.Scan() {
+		line := scanner.Text()
+
+		if re.MatchString(line) {
+			matches++
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return matches, err
+	}
+	return matches, nil
 }
 
 func countLines(path string) (int64, error) {
