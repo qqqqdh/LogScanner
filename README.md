@@ -38,7 +38,7 @@ Go-LogScanner는 분산된 환경에서 발생하는 방대한 로그 데이터�
 Installation
 Bash
 
-git clone https://github.com/your-id/go-logscanner.git
+git clone https://github.com/qqqqdh/Go-LogScanner.git
 cd go-logscanner
 go build -o logscanner main.go
 
@@ -66,4 +66,5 @@ Flags:
 👨‍💻 Intern Appeal: "Why Go?"
 
     "저는 대용량 데이터를 빠르고 안전하게 처리할 수 있는 Go의 특성을 깊이 이해하고 있습니다. 단순히 기능을 구현하는 것에 그치지 않고, Goroutine의 생명 주기 관리와 Channel을 통한 데이터 무결성 보장 등 효율적인 자원 활용에 집중하여 프로젝트를 설계했습니다."
+
 
