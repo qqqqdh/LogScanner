@@ -56,8 +56,7 @@ func main() {
 		go func(workerID int) {
 			defer wg.Done()
 			for file := range jobs {
-				stat := processFile(file, re)
-				results <- stat
+				results <- processFileOnce(file, re) // ✅ Step 5 핵심(한 번 읽기)
 			}
 		}(i)
 	}
@@ -99,35 +98,26 @@ func main() {
 	fmt.Printf("총 매칭 수: %d\n", totalMatches)
 }
 
-func processFile(path string, re *regexp.Regexp) FileStat {
-	lines, err := countLines(path)
+// ✅ Step 5 핵심: 파일을 한 번만 읽어서 lines + matches를 동시에 계산
+func processFileOnce(path string, re *regexp.Regexp) FileStat {
+	f, err := os.Open(path)
 	if err != nil {
 		return FileStat{File: path, Err: err}
 	}
+	defer f.Close()
 
-	matches, err := countMatches(path, re)
-	if err != nil {
-		return FileStat{File: path, Lines: lines, Err: err}
-	}
+	scanner := bufio.NewScanner(f)
 
-	return FileStat{File: path, Lines: lines, Matches: matches}
-}
-
-func countMatches(path string, re *regexp.Regexp) (int64, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return 0, err
-	}
-	defer file.Close()
-
-	scanner := bufio.NewScanner(file)
-
-	const maxCapacity = 1024 * 1024 * 8
+	// 긴 라인(기본 64KB 제한) 대비 버퍼 확장
+	const maxCapacity = 1024 * 1024 * 8 // 8MB
 	buf := make([]byte, 0, 64*1024)
 	scanner.Buffer(buf, maxCapacity)
 
+	var lines int64
 	var matches int64
+
 	for scanner.Scan() {
+		lines++
 		line := scanner.Text()
 		if re.MatchString(line) {
 			matches++
@@ -135,31 +125,8 @@ func countMatches(path string, re *regexp.Regexp) (int64, error) {
 	}
 
 	if err := scanner.Err(); err != nil {
-		return matches, err
-	}
-	return matches, nil
-}
-
-func countLines(path string) (int64, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return 0, err
-	}
-	defer file.Close()
-
-	scanner := bufio.NewScanner(file)
-
-	const maxCapacity = 1024 * 1024 * 8
-	buf := make([]byte, 0, 64*1024)
-	scanner.Buffer(buf, maxCapacity)
-
-	var lines int64
-	for scanner.Scan() {
-		lines++
+		return FileStat{File: path, Lines: lines, Matches: matches, Err: err}
 	}
 
-	if err := scanner.Err(); err != nil {
-		return lines, err
-	}
-	return lines, nil
+	return FileStat{File: path, Lines: lines, Matches: matches, Err: nil}
 }
