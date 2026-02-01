@@ -1,0 +1,9 @@
+INFO  payment service started
+INFO  payment requested order=1001
+INFO  payment approved order=1001
+WARN  slow payment gateway order=1002
+ERROR payment failed order=1002
+INFO  retry payment order=1002
+INFO  payment approved order=1002
+WARN  delayed settlement order=1003
+INFO  payment service shutdown

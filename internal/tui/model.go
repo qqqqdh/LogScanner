@@ -78,8 +78,11 @@ type model struct {
 	tailItems []tailItem
 	focus     focusArea
 
-	// tail panel sizing
-	tailPanelHeight int
+	// panel sizing (content area)
+	panelHeight     int // 박스 전체 높이
+	innerHeight     int // 박스 내부 콘텐츠 높이(타이틀 제외)
+	tailPanelHeight int // 오른쪽에 표시할 라인 수 (= innerHeight)
+	tailPanelWidth  int // 오른쪽 내부폭(줄을 끝까지 채우기)
 }
 
 func initialModel(files []string, updates <-chan analyzer.Event, cfg Config, pauseFn func(bool)) model {
@@ -108,6 +111,7 @@ func initialModel(files []string, updates <-chan analyzer.Event, cfg Config, pau
 	}
 
 	t := table.New(table.WithColumns(cols), table.WithRows(rows), table.WithFocused(true))
+	// 초기값은 적당히. 실제 높이/폭은 WindowSizeMsg에서 맞춤.
 	t.SetHeight(minInt(12, len(rows)+1))
 
 	st := table.DefaultStyles()
@@ -116,18 +120,22 @@ func initialModel(files []string, updates <-chan analyzer.Event, cfg Config, pau
 	t.SetStyles(st)
 
 	return model{
-		started:         time.Now(),
-		prog:            p,
-		spin:            s,
-		tab:             t,
-		cfg:             cfg,
-		updates:         updates,
-		pauseFn:         pauseFn,
-		filesTotal:      len(files),
-		rowIndexByFile:  rowIndex,
-		tailItems:       make([]tailItem, 0, cfg.TailMax),
-		focus:           focusTable,
-		tailPanelHeight: 10,
+		started:        time.Now(),
+		prog:           p,
+		spin:           s,
+		tab:            t,
+		cfg:            cfg,
+		updates:        updates,
+		pauseFn:        pauseFn,
+		filesTotal:     len(files),
+		rowIndexByFile: rowIndex,
+		tailItems:      make([]tailItem, 0, cfg.TailMax),
+		focus:          focusTable,
+
+		panelHeight:     12,
+		innerHeight:     9,
+		tailPanelHeight: 9,
+		tailPanelWidth:  40,
 	}
 }
 
@@ -157,16 +165,59 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 		m.prog.Width = clamp(m.width-12, 20, 90)
 
-		leftW := clamp(m.width/2, 40, 90)
-		fileColWidth := clamp(leftW-26, 20, 80)
-		cols := m.tab.Columns()
-		cols[0].Width = fileColWidth
-		m.tab.SetColumns(cols)
+		// View()에서 찍는 줄 수와 맞춰서 content 영역 높이 계산
+		// header(2) + blank(1) + bar(1) + stats(1) = 5
+		// 그리고 joinLines에서 top, "", row, "", hint => 빈줄 2 + hint 1
+		// 합: 5 + 3 = 8
+		topAndBottom := 8
 
-		// tail panel height: 화면 높이에 따라 자동
-		// 위쪽(header+bar+stats+간격) 대략 6~7줄 + hint 1줄 빼고 남는 공간에서
-		// 테이블 높이 고려해 적당히 8~14로 clamp
-		m.tailPanelHeight = clamp(m.height-14, 8, 14)
+		contentH := m.height - topAndBottom
+		if contentH < 10 {
+			contentH = 10
+		}
+		m.panelHeight = contentH
+
+		// box는 border 상하 2줄 + title 1줄이 들어가므로 내부 콘텐츠 높이:
+		innerH := contentH - 3
+		if innerH < 3 {
+			innerH = 3
+		}
+		m.innerHeight = innerH
+		m.tailPanelHeight = innerH
+
+		// layout widths (View와 동일)
+		leftW := clamp(m.width/2, 40, 90)
+		rightW := maxInt(30, m.width-leftW-3)
+
+		// box 내부폭 = width - (border2 + padding2) = width - 4
+		leftInnerW := maxInt(1, leftW-4)
+		rightInnerW := maxInt(1, rightW-4)
+		m.tailPanelWidth = rightInnerW
+
+		// ✅ 테이블 폭을 box 내부폭에 맞춤 (wrap 방지의 시작)
+		m.tab.SetWidth(leftInnerW)
+
+		// ✅ 컬럼 폭을 "테이블 폭" 기준으로 재계산해서 wrap 안 나게
+		// (구분자/패딩 여유를 조금 잡아줌)
+		linesW := 8
+		matchesW := 8
+		statusW := 8
+		gutter := 6 // 컬럼 사이 공백/구분자 여유
+
+		fileW := leftInnerW - (linesW + matchesW + statusW + gutter)
+		fileW = clamp(fileW, 20, 120) // 너무 작아져서 또 wrap 나지 않게 최소 20
+
+		cols := m.tab.Columns()
+		if len(cols) >= 4 {
+			cols[0].Width = fileW
+			cols[1].Width = linesW
+			cols[2].Width = matchesW
+			cols[3].Width = statusW
+			m.tab.SetColumns(cols)
+		}
+
+		// ✅ 테이블 높이도 내부 콘텐츠 높이에 맞춤 (아래 빈칸 방지)
+		m.tab.SetHeight(innerH)
 
 		return m, nil
 
@@ -188,7 +239,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		default:
-			// table만 키 처리(이 버전은 tail 스크롤은 고정 패널이라 생략)
 			if m.focus == focusTable {
 				var cmd tea.Cmd
 				m.tab, cmd = m.tab.Update(msg)
@@ -220,12 +270,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		text := fmt.Sprintf("[%s] %s", msg.File, msg.Line)
 		m.tailItems = append(m.tailItems, tailItem{Seq: msg.Seq, Text: text})
 
-		// Seq 정렬 (병렬 순서 보정)
 		sort.Slice(m.tailItems, func(i, j int) bool { return m.tailItems[i].Seq < m.tailItems[j].Seq })
 		if len(m.tailItems) > m.cfg.TailMax {
 			m.tailItems = m.tailItems[len(m.tailItems)-m.cfg.TailMax:]
 		}
-
 		return m, tea.Batch(waitEvent(m.updates))
 
 	case analyzer.Totals:
@@ -246,7 +294,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		if s.Done {
 			m.done = true
-			return m, cmd // 자동 종료 X
+			return m, cmd
 		}
 		return m, tea.Batch(cmd, waitEvent(m.updates))
 
@@ -256,7 +304,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) View() string {
-	// 상태 배지
 	statusBadge := badgeRun.Render(" SCANNING ")
 	if m.paused {
 		statusBadge = badgePause.Render(" PAUSED ")
@@ -285,13 +332,16 @@ func (m model) View() string {
 	leftW := clamp(m.width/2, 40, 90)
 	rightW := maxInt(30, m.width-leftW-3)
 
-	// table box
-	tableBox := box.Width(leftW).Render(cTitle.Render("Files") + "\n" + m.tab.View())
+	// ✅ 박스 높이를 content 높이로 고정해서 아래 빈칸을 없앰
+	tableBox := box.Width(leftW).Height(m.panelHeight).Render(
+		cTitle.Render("Files") + "\n" + m.tab.View(),
+	)
 
-	// tail panel content (고정 높이)
 	tailLines := m.renderTailLines(m.tailPanelHeight)
 	tailContent := strings.Join(tailLines, "\n")
-	tailBox := box.Width(rightW).Render(cTitle.Render("Recent Matches") + "\n" + tailContent)
+	tailBox := box.Width(rightW).Height(m.panelHeight).Render(
+		cTitle.Render("Recent Matches") + "\n" + tailContent,
+	)
 
 	row := lipgloss.JoinHorizontal(lipgloss.Top, tableBox, " ", tailBox)
 
@@ -305,17 +355,14 @@ func (m model) View() string {
 	if m.err != nil {
 		return joinLines(top, "", badgeErr.Render("ERROR: "+m.err.Error()), "", row, "", hint)
 	}
-
 	return joinLines(top, "", row, "", hint)
 }
 
 func (m model) renderTailLines(height int) []string {
-	// tailItems는 이미 Seq 정렬된 상태라고 가정(Update에서 정렬함)
 	if height <= 0 {
 		return []string{}
 	}
 
-	// 패널에 보여줄 만큼만: "최근 height 줄"
 	start := 0
 	if len(m.tailItems) > height {
 		start = len(m.tailItems) - height
@@ -323,24 +370,34 @@ func (m model) renderTailLines(height int) []string {
 
 	out := make([]string, 0, height)
 	for _, it := range m.tailItems[start:] {
-		out = append(out, highlight(it.Text))
+		out = append(out, m.highlightLine(it.Text))
 	}
 
-	// 항상 height 줄 채우기(빈 줄로 채워서 박스가 안정적으로 보이게)
+	// 항상 height 줄 채우기 (폭도 내부폭으로)
 	for len(out) < height {
-		out = append(out, "")
+		out = append(out, lipgloss.NewStyle().Width(m.tailPanelWidth).Render(""))
 	}
 	return out
 }
 
-func highlight(line string) string {
+// 오른쪽 패널 줄을 내부 폭만큼 강제로 늘려서 "오른쪽으로 빈칸"이 보기 좋게
+func (m model) highlightLine(line string) string {
+	w := m.tailPanelWidth
+	if w <= 0 {
+		w = 1
+	}
+
+	styled := line
 	if strings.Contains(line, "ERROR") {
-		return badgeErr.Render(line)
+		styled = badgeErr.Render(line)
+	} else if strings.Contains(line, "WARN") {
+		styled = badgeWarn.Render(line)
 	}
-	if strings.Contains(line, "WARN") {
-		return badgeWarn.Render(line)
-	}
-	return line
+
+	return lipgloss.NewStyle().
+		Width(w).
+		MaxWidth(w).
+		Render(styled)
 }
 
 func joinLines(lines ...string) string { return strings.Join(lines, "\n") }
