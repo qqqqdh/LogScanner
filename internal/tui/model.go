@@ -2,7 +2,6 @@ package tui
 
 import (
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 
@@ -31,22 +30,20 @@ var (
 	cTitle = lipgloss.NewStyle().Bold(true)
 	cDim   = lipgloss.NewStyle().Faint(true)
 
-	box = lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		Padding(0, 1)
+	// [수정] 테두리 모양을 선이 여러 개인 DoubleBorder로 변경
+	box        = lipgloss.NewStyle().Border(lipgloss.DoubleBorder()).Padding(0, 1)
+	focusedBox = box.Copy().BorderForeground(lipgloss.Color("6"))
 
-	headerBar = lipgloss.NewStyle().
-			Border(lipgloss.NormalBorder(), false, false, true, false).
-			Padding(0, 1)
+	headerBar = lipgloss.NewStyle().Border(lipgloss.NormalBorder(), false, false, true, false).Padding(0, 1)
 
 	badgeOK    = lipgloss.NewStyle().Foreground(lipgloss.Color("10")).Bold(true)
 	badgeRun   = lipgloss.NewStyle().Foreground(lipgloss.Color("12")).Bold(true)
 	badgePause = lipgloss.NewStyle().Foreground(lipgloss.Color("11")).Bold(true)
+	badgeWarn  = lipgloss.NewStyle().Foreground(lipgloss.Color("11")).Bold(true)
+	badgeErr   = lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Bold(true)
 
-	badgeWarn = lipgloss.NewStyle().Foreground(lipgloss.Color("11")).Bold(true)
-	badgeErr  = lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Bold(true)
-
-	keyHint = lipgloss.NewStyle().Faint(true)
+	selectedLineStyle = lipgloss.NewStyle().Background(lipgloss.Color("57")).Foreground(lipgloss.Color("229")).Bold(true)
+	keyHint           = lipgloss.NewStyle().Faint(true)
 )
 
 type model struct {
@@ -54,13 +51,11 @@ type model struct {
 	height int
 
 	started time.Time
+	prog    progress.Model
+	spin    spinner.Model
+	tab     table.Model
 
-	prog progress.Model
-	spin spinner.Model
-	tab  table.Model
-
-	cfg Config
-
+	cfg     Config
 	updates <-chan analyzer.Event
 	pauseFn func(bool)
 
@@ -74,68 +69,60 @@ type model struct {
 	err    error
 
 	rowIndexByFile map[string]int
+	tailItems      []tailItem
+	focus          focusArea
 
-	tailItems []tailItem
-	focus     focusArea
+	tailPageIndex     int
+	tailSelectedIndex int
+	autoPageFollow    bool
 
-	// panel sizing (content area)
-	panelHeight     int // 박스 전체 높이
-	innerHeight     int // 박스 내부 콘텐츠 높이(타이틀 제외)
-	tailPanelHeight int // 오른쪽에 표시할 라인 수 (= innerHeight)
-	tailPanelWidth  int // 오른쪽 내부폭(줄을 끝까지 채우기)
+	panelHeight     int
+	innerHeight     int
+	tailPanelHeight int
+	tailPanelWidth  int
+	lastTableUpdate time.Time
 }
 
-func initialModel(files []string, updates <-chan analyzer.Event, cfg Config, pauseFn func(bool)) model {
+func InitialModel(files []string, updates <-chan analyzer.Event, cfg Config, pauseFn func(bool)) model {
 	p := progress.New(progress.WithDefaultGradient())
 	p.Width = 40
-
 	s := spinner.New()
 	s.Spinner = spinner.Dot
 
-	sorted := append([]string(nil), files...)
-	sort.Strings(sorted)
-
 	cols := []table.Column{
-		{Title: "File", Width: 44},
+		{Title: "File", Width: 40},
 		{Title: "Lines", Width: 10},
 		{Title: "Matches", Width: 10},
-		{Title: "Status", Width: 8},
+		{Title: "Status", Width: 10},
 	}
 
-	rows := make([]table.Row, 0, len(sorted))
-	rowIndex := make(map[string]int, len(sorted))
-
-	for i, f := range sorted {
-		rows = append(rows, table.Row{f, "-", "-", "WAIT"})
+	rows := make([]table.Row, 0, len(files))
+	rowIndex := make(map[string]int, len(files))
+	for i, f := range files {
+		rows = append(rows, table.Row{f, "0", "0", "WAIT"})
 		rowIndex[f] = i
 	}
 
-	t := table.New(table.WithColumns(cols), table.WithRows(rows), table.WithFocused(true))
-	// 초기값은 적당히. 실제 높이/폭은 WindowSizeMsg에서 맞춤.
-	t.SetHeight(minInt(12, len(rows)+1))
-
+	t := table.New(table.WithColumns(cols), table.WithRows(rows), table.WithFocused(false))
 	st := table.DefaultStyles()
 	st.Header = st.Header.Bold(true)
-	st.Selected = st.Selected.Bold(true)
+	st.Selected = st.Selected.Foreground(lipgloss.Color("229")).Background(lipgloss.Color("57")).Bold(true)
 	t.SetStyles(st)
 
 	return model{
-		started:        time.Now(),
-		prog:           p,
-		spin:           s,
-		tab:            t,
-		cfg:            cfg,
-		updates:        updates,
-		pauseFn:        pauseFn,
-		filesTotal:     len(files),
-		rowIndexByFile: rowIndex,
-		tailItems:      make([]tailItem, 0, cfg.TailMax),
-		focus:          focusTable,
-
-		panelHeight:     12,
-		innerHeight:     9,
-		tailPanelHeight: 9,
-		tailPanelWidth:  40,
+		started:         time.Now(),
+		prog:            p,
+		spin:            s,
+		tab:             t,
+		cfg:             cfg,
+		updates:         updates,
+		pauseFn:         pauseFn,
+		filesTotal:      len(files),
+		rowIndexByFile:  rowIndex,
+		tailItems:       make([]tailItem, 0),
+		focus:           focusTail, // 로그 창이 왼쪽에 왔으므로 로그 창을 우선 포커스
+		autoPageFollow:  true,
+		lastTableUpdate: time.Now(),
 	}
 }
 
@@ -147,7 +134,7 @@ func waitEvent(ch <-chan analyzer.Event) tea.Cmd {
 	return func() tea.Msg {
 		ev, ok := <-ch
 		if !ok {
-			return analyzer.Totals{Done: true}
+			return nil
 		}
 		return ev
 	}
@@ -155,70 +142,21 @@ func waitEvent(ch <-chan analyzer.Event) tea.Cmd {
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
-
-	case spinner.TickMsg:
-		var cmd tea.Cmd
-		m.spin, cmd = m.spin.Update(msg)
-		return m, cmd
-
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.prog.Width = clamp(m.width-12, 20, 90)
+		topAndBottom := 10
+		m.panelHeight = maxInt(10, m.height-topAndBottom)
+		m.innerHeight = maxInt(3, m.panelHeight-2)
+		m.tailPanelHeight = m.innerHeight
 
-		// View()에서 찍는 줄 수와 맞춰서 content 영역 높이 계산
-		// header(2) + blank(1) + bar(1) + stats(1) = 5
-		// 그리고 joinLines에서 top, "", row, "", hint => 빈줄 2 + hint 1
-		// 합: 5 + 3 = 8
-		topAndBottom := 8
-
-		contentH := m.height - topAndBottom
-		if contentH < 10 {
-			contentH = 10
-		}
-		m.panelHeight = contentH
-
-		// box는 border 상하 2줄 + title 1줄이 들어가므로 내부 콘텐츠 높이:
-		innerH := contentH - 3
-		if innerH < 3 {
-			innerH = 3
-		}
-		m.innerHeight = innerH
-		m.tailPanelHeight = innerH
-
-		// layout widths (View와 동일)
 		leftW := clamp(m.width/2, 40, 90)
 		rightW := maxInt(30, m.width-leftW-3)
 
-		// box 내부폭 = width - (border2 + padding2) = width - 4
-		leftInnerW := maxInt(1, leftW-4)
-		rightInnerW := maxInt(1, rightW-4)
-		m.tailPanelWidth = rightInnerW
-
-		// ✅ 테이블 폭을 box 내부폭에 맞춤 (wrap 방지의 시작)
-		m.tab.SetWidth(leftInnerW)
-
-		// ✅ 컬럼 폭을 "테이블 폭" 기준으로 재계산해서 wrap 안 나게
-		// (구분자/패딩 여유를 조금 잡아줌)
-		linesW := 8
-		matchesW := 8
-		statusW := 8
-		gutter := 6 // 컬럼 사이 공백/구분자 여유
-
-		fileW := leftInnerW - (linesW + matchesW + statusW + gutter)
-		fileW = clamp(fileW, 20, 120) // 너무 작아져서 또 wrap 나지 않게 최소 20
-
-		cols := m.tab.Columns()
-		if len(cols) >= 4 {
-			cols[0].Width = fileW
-			cols[1].Width = linesW
-			cols[2].Width = matchesW
-			cols[3].Width = statusW
-			m.tab.SetColumns(cols)
-		}
-
-		// ✅ 테이블 높이도 내부 콘텐츠 높이에 맞춤 (아래 빈칸 방지)
-		m.tab.SetHeight(innerH)
-
+		// [수정] 왼쪽(로그)과 오른쪽(테이블) 너비 설정
+		m.tailPanelWidth = leftW - 4
+		m.tab.SetWidth(rightW - 4)
+		m.tab.SetHeight(m.innerHeight - 1)
 		return m, nil
 
 	case tea.KeyMsg:
@@ -226,10 +164,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "q", "ctrl+c":
 			return m, tea.Quit
 		case "tab":
-			if m.focus == focusTable {
-				m.focus = focusTail
-			} else {
+			if m.focus == focusTail {
 				m.focus = focusTable
+				m.tab.Focus()
+			} else {
+				m.focus = focusTail
+				m.tab.Blur()
 			}
 			return m, nil
 		case "p":
@@ -238,69 +178,104 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.pauseFn(m.paused)
 			}
 			return m, nil
-		default:
-			if m.focus == focusTable {
-				var cmd tea.Cmd
-				m.tab, cmd = m.tab.Update(msg)
-				return m, cmd
+		case "left", "right", "up", "down":
+			if m.focus == focusTail {
+				m.autoPageFollow = false
+				pageSize := m.tailPanelHeight
+				total := len(m.tailItems)
+				if total == 0 {
+					return m, nil
+				}
+				totalPages := (total + pageSize - 1) / maxInt(1, pageSize)
+
+				switch msg.String() {
+				case "left":
+					if m.tailPageIndex > 0 {
+						m.tailPageIndex--
+					}
+				case "right":
+					if m.tailPageIndex < totalPages-1 {
+						m.tailPageIndex++
+					}
+				case "up":
+					if m.tailSelectedIndex > 0 {
+						m.tailSelectedIndex--
+						if m.tailSelectedIndex < m.tailPageIndex*pageSize {
+							m.tailPageIndex--
+						}
+					}
+				case "down":
+					if m.tailSelectedIndex < total-1 {
+						m.tailSelectedIndex++
+						if m.tailSelectedIndex >= (m.tailPageIndex+1)*pageSize {
+							m.tailPageIndex++
+						}
+					}
+				}
+				return m, nil
 			}
+		case "f":
+			m.autoPageFollow = true
 			return m, nil
 		}
 
-	case analyzer.FileUpdate:
-		u := msg
-		if idx, ok := m.rowIndexByFile[u.File]; ok {
-			rows := m.tab.Rows()
-			lines := "-"
-			matches := "-"
-			status := u.Status
-			if status == "" {
-				status = "WAIT"
-			}
-			if status != "WAIT" {
-				lines = fmt.Sprintf("%d", u.Lines)
-				matches = fmt.Sprintf("%d", u.Matches)
-			}
-			rows[idx] = table.Row{u.File, lines, matches, status}
-			m.tab.SetRows(rows)
+		if m.focus == focusTable {
+			var cmd tea.Cmd
+			m.tab, cmd = m.tab.Update(msg)
+			return m, cmd
 		}
-		return m, tea.Batch(waitEvent(m.updates))
 
 	case analyzer.MatchLine:
 		text := fmt.Sprintf("[%s] %s", msg.File, msg.Line)
 		m.tailItems = append(m.tailItems, tailItem{Seq: msg.Seq, Text: text})
+		m.matches++
 
-		sort.Slice(m.tailItems, func(i, j int) bool { return m.tailItems[i].Seq < m.tailItems[j].Seq })
-		if len(m.tailItems) > m.cfg.TailMax {
-			m.tailItems = m.tailItems[len(m.tailItems)-m.cfg.TailMax:]
+		pageSize := m.tailPanelHeight
+		totalLogs := len(m.tailItems)
+		lastLogPage := (totalLogs - 1) / maxInt(1, pageSize)
+
+		if m.autoPageFollow {
+			m.tailPageIndex = lastLogPage
+			m.tailSelectedIndex = totalLogs - 1
 		}
-		return m, tea.Batch(waitEvent(m.updates))
+		return m, waitEvent(m.updates)
+
+	case spinner.TickMsg:
+		var cmd tea.Cmd
+		m.spin, cmd = m.spin.Update(msg)
+		return m, cmd
+
+	case analyzer.FileUpdate:
+		u := msg
+		if idx, ok := m.rowIndexByFile[u.File]; ok {
+			if time.Since(m.lastTableUpdate) > 100*time.Millisecond || u.Status == "DONE" {
+				rows := m.tab.Rows()
+				rows[idx] = table.Row{u.File, fmt.Sprintf("%d", u.Lines), fmt.Sprintf("%d", u.Matches), u.Status}
+				m.tab.SetRows(rows)
+				m.lastTableUpdate = time.Now()
+			}
+		}
+		return m, waitEvent(m.updates)
 
 	case analyzer.Totals:
 		s := msg
 		if s.Err != nil {
 			m.err = s.Err
 		}
-
-		m.filesDone = s.FilesDone
-		m.linesTotal = s.LinesTotal
-		m.matches = s.MatchesTotal
-
-		var percent float64
-		if m.filesTotal > 0 {
-			percent = float64(m.filesDone) / float64(m.filesTotal)
+		m.filesDone, m.linesTotal = s.FilesDone, s.LinesTotal
+		if s.MatchesTotal > 0 {
+			m.matches = s.MatchesTotal
 		}
+		percent := float64(m.filesDone) / float64(maxInt(1, m.filesTotal))
 		cmd := m.prog.SetPercent(percent)
-
 		if s.Done {
 			m.done = true
-			return m, cmd
+		} else {
+			cmd = tea.Batch(cmd, waitEvent(m.updates))
 		}
-		return m, tea.Batch(cmd, waitEvent(m.updates))
-
-	default:
-		return m, nil
+		return m, cmd
 	}
+	return m, nil
 }
 
 func (m model) View() string {
@@ -313,48 +288,46 @@ func (m model) View() string {
 	}
 
 	headLeft := cTitle.Render("Go-LogScanner") + " " + statusBadge
-	headRight := cDim.Render(fmt.Sprintf("keyword=%s  workers=%d  tail=%d", m.cfg.Keyword, m.cfg.Concurrent, m.cfg.TailMax))
-	header := headerBar.Width(maxInt(0, m.width-2)).Render(headLeft + "\n" + headRight)
+	header := headerBar.Width(maxInt(0, m.width-2)).Render(headLeft + "\n" + cDim.Render(fmt.Sprintf("keyword=%s  workers=%d", m.cfg.Keyword, m.cfg.Concurrent)))
 
-	elapsed := time.Since(m.started).Truncate(100 * time.Millisecond)
-	percent := 0.0
-	if m.filesTotal > 0 {
-		percent = float64(m.filesDone) / float64(m.filesTotal)
-	}
-	bar := m.prog.ViewAs(percent)
+	bar := m.prog.ViewAs(float64(m.filesDone) / float64(maxInt(1, m.filesTotal)))
+	stats := cDim.Render(fmt.Sprintf("Files %d/%d  Lines %d  Matches %d", m.filesDone, m.filesTotal, m.linesTotal, m.matches))
+	top := joinLines(header, "", bar, stats)
 
-	stats := fmt.Sprintf("Files %d/%d  Lines %d  Matches %d  Elapsed %s",
-		m.filesDone, m.filesTotal, m.linesTotal, m.matches, elapsed)
-
-	top := joinLines(header, "", bar, cDim.Render(stats))
-
-	// layout widths
 	leftW := clamp(m.width/2, 40, 90)
 	rightW := maxInt(30, m.width-leftW-3)
 
-	// ✅ 박스 높이를 content 높이로 고정해서 아래 빈칸을 없앰
-	tableBox := box.Width(leftW).Height(m.panelHeight).Render(
-		cTitle.Render("Files") + "\n" + m.tab.View(),
-	)
-
-	tailLines := m.renderTailLines(m.tailPanelHeight)
-	tailContent := strings.Join(tailLines, "\n")
-	tailBox := box.Width(rightW).Height(m.panelHeight).Render(
-		cTitle.Render("Recent Matches") + "\n" + tailContent,
-	)
-
-	row := lipgloss.JoinHorizontal(lipgloss.Top, tableBox, " ", tailBox)
-
-	hint := ""
-	if m.done {
-		hint = keyHint.Render("Done. Press q to quit | tab focus | ↑/↓ table | p pause/resume")
-	} else {
-		hint = keyHint.Render("Keys: q quit | tab focus | ↑/↓ table | p pause/resume")
+	tStyle, rStyle := box, box
+	if m.focus == focusTable {
+		tStyle = focusedBox
+	}
+	if m.focus == focusTail {
+		rStyle = focusedBox
 	}
 
-	if m.err != nil {
-		return joinLines(top, "", badgeErr.Render("ERROR: "+m.err.Error()), "", row, "", hint)
+	// [수정] 왼쪽: 로그 기록 박스 (Matches)
+	pageSize := m.tailPanelHeight
+	totalLogs := len(m.tailItems)
+	totalPages := (totalLogs + pageSize - 1) / maxInt(1, pageSize)
+	if totalPages == 0 {
+		totalPages = 1
 	}
+
+	followStatus := ""
+	if m.autoPageFollow {
+		followStatus = " [FOLLOW]"
+	}
+	tailTitle := fmt.Sprintf("Matches (Page %d/%d)%s", m.tailPageIndex+1, totalPages, followStatus)
+	tailContent := strings.Join(m.renderTailLines(pageSize), "\n")
+	tailBox := rStyle.Width(leftW).Height(m.panelHeight).Render(cTitle.Render(tailTitle) + "\n" + tailContent)
+
+	// [수정] 오른쪽: 파일 목록 박스 (Files)
+	tableBox := tStyle.Width(rightW).Height(m.panelHeight).Render(cTitle.Render("Files") + "\n" + m.tab.View())
+
+	// [수정] 가로로 합칠 때 순서 변경 (로그 박스 먼저)
+	row := lipgloss.JoinHorizontal(lipgloss.Top, tailBox, " ", tableBox)
+	hint := keyHint.Render("Tab: Focus | Arrows: Page/Select | F: Follow | P: Pause | Q: Quit")
+
 	return joinLines(top, "", row, "", hint)
 }
 
@@ -362,46 +335,48 @@ func (m model) renderTailLines(height int) []string {
 	if height <= 0 {
 		return []string{}
 	}
-
-	start := 0
-	if len(m.tailItems) > height {
-		start = len(m.tailItems) - height
+	start := m.tailPageIndex * height
+	end := start + height
+	if end > len(m.tailItems) {
+		end = len(m.tailItems)
 	}
 
 	out := make([]string, 0, height)
-	for _, it := range m.tailItems[start:] {
-		out = append(out, m.highlightLine(it.Text))
-	}
+	if start < len(m.tailItems) {
+		for i := start; i < end; i++ {
+			it := m.tailItems[i]
+			lineText := it.Text
+			if len(lineText) > m.tailPanelWidth {
+				lineText = lineText[:m.tailPanelWidth-3] + "..."
+			}
 
-	// 항상 height 줄 채우기 (폭도 내부폭으로)
+			var styledLine string
+			if i == m.tailSelectedIndex && m.focus == focusTail {
+				styledLine = selectedLineStyle.Width(m.tailPanelWidth).Render(lineText)
+			} else {
+				styledLine = m.highlightLine(lineText)
+			}
+			out = append(out, styledLine)
+		}
+	}
 	for len(out) < height {
 		out = append(out, lipgloss.NewStyle().Width(m.tailPanelWidth).Render(""))
 	}
 	return out
 }
 
-// 오른쪽 패널 줄을 내부 폭만큼 강제로 늘려서 "오른쪽으로 빈칸"이 보기 좋게
 func (m model) highlightLine(line string) string {
-	w := m.tailPanelWidth
-	if w <= 0 {
-		w = 1
-	}
-
-	styled := line
+	style := lipgloss.NewStyle().Width(m.tailPanelWidth).MaxWidth(m.tailPanelWidth)
 	if strings.Contains(line, "ERROR") {
-		styled = badgeErr.Render(line)
-	} else if strings.Contains(line, "WARN") {
-		styled = badgeWarn.Render(line)
+		return badgeErr.Inherit(style).Render(line)
 	}
-
-	return lipgloss.NewStyle().
-		Width(w).
-		MaxWidth(w).
-		Render(styled)
+	if strings.Contains(line, "WARN") {
+		return badgeWarn.Inherit(style).Render(line)
+	}
+	return style.Render(line)
 }
 
 func joinLines(lines ...string) string { return strings.Join(lines, "\n") }
-
 func clamp(v, lo, hi int) int {
 	if v < lo {
 		return lo
@@ -411,14 +386,6 @@ func clamp(v, lo, hi int) int {
 	}
 	return v
 }
-
-func minInt(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
 func maxInt(a, b int) int {
 	if a > b {
 		return a
