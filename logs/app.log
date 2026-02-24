@@ -6,3 +6,5 @@ INFO  retrying connection
 WARN  slow query again
 WARN  slow query again
 WARN  GET /점심
+WARN  [404] GET /저녁 (0s)
+WARN  [404] GET /점심 (0s)
