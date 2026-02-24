@@ -1,4 +1,4 @@
-🔍 Go-LogScanner
+🔍  LogScanner
 
     병렬 처리 기술을 활용한 고성능 TUI 로그 분석 대시보드
 
@@ -42,7 +42,7 @@ LogScanner는 다수의 로그 파일을 고루틴 워커풀(Worker Pool)로 병
 설치 (Installation)
 Bash
 
-git clone https://github.com/qqqqdh/Go-LogScanner.git
+git clone https://github.com/qqqqdh/LogScanner.git
 
 cd go-logscanner
 

@@ -30,9 +30,16 @@ var (
 	cTitle = lipgloss.NewStyle().Bold(true)
 	cDim   = lipgloss.NewStyle().Faint(true)
 
-	// [수정] 테두리 모양을 선이 여러 개인 DoubleBorder로 변경
+	// 선이 여러 개인 느낌을 주는 DoubleBorder 적용
 	box        = lipgloss.NewStyle().Border(lipgloss.DoubleBorder()).Padding(0, 1)
 	focusedBox = box.Copy().BorderForeground(lipgloss.Color("6"))
+
+	// 상세 보기용 팝업 스타일
+	modalBox = lipgloss.NewStyle().
+			Border(lipgloss.DoubleBorder()).
+			BorderForeground(lipgloss.Color("5")). // 보라색 테두리
+			Padding(1, 2).
+			Background(lipgloss.Color("0"))
 
 	headerBar = lipgloss.NewStyle().Border(lipgloss.NormalBorder(), false, false, true, false).Padding(0, 1)
 
@@ -72,9 +79,11 @@ type model struct {
 	tailItems      []tailItem
 	focus          focusArea
 
+	// 페이지네이션 및 상세 보기 제어
 	tailPageIndex     int
 	tailSelectedIndex int
 	autoPageFollow    bool
+	showDetail        bool // [추가] 상세 보기 모드 여부
 
 	panelHeight     int
 	innerHeight     int
@@ -120,7 +129,7 @@ func InitialModel(files []string, updates <-chan analyzer.Event, cfg Config, pau
 		filesTotal:      len(files),
 		rowIndexByFile:  rowIndex,
 		tailItems:       make([]tailItem, 0),
-		focus:           focusTail, // 로그 창이 왼쪽에 왔으므로 로그 창을 우선 포커스
+		focus:           focusTail,
 		autoPageFollow:  true,
 		lastTableUpdate: time.Now(),
 	}
@@ -153,13 +162,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		leftW := clamp(m.width/2, 40, 90)
 		rightW := maxInt(30, m.width-leftW-3)
 
-		// [수정] 왼쪽(로그)과 오른쪽(테이블) 너비 설정
 		m.tailPanelWidth = leftW - 4
 		m.tab.SetWidth(rightW - 4)
 		m.tab.SetHeight(m.innerHeight - 1)
 		return m, nil
 
 	case tea.KeyMsg:
+		// [추가] 상세 보기 모드일 때 닫기 로직
+		if m.showDetail {
+			switch msg.String() {
+			case "esc", "enter", "q":
+				m.showDetail = false
+				return m, nil
+			}
+			return m, nil
+		}
+
 		switch msg.String() {
 		case "q", "ctrl+c":
 			return m, tea.Quit
@@ -170,6 +188,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				m.focus = focusTail
 				m.tab.Blur()
+			}
+			return m, nil
+		case "enter":
+			// [추가] 로그 창에서 엔터 누르면 전문 보기 활성화
+			if m.focus == focusTail && len(m.tailItems) > 0 {
+				m.showDetail = true
 			}
 			return m, nil
 		case "p":
@@ -229,11 +253,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		text := fmt.Sprintf("[%s] %s", msg.File, msg.Line)
 		m.tailItems = append(m.tailItems, tailItem{Seq: msg.Seq, Text: text})
 		m.matches++
-
 		pageSize := m.tailPanelHeight
 		totalLogs := len(m.tailItems)
 		lastLogPage := (totalLogs - 1) / maxInt(1, pageSize)
-
 		if m.autoPageFollow {
 			m.tailPageIndex = lastLogPage
 			m.tailSelectedIndex = totalLogs - 1
@@ -305,7 +327,6 @@ func (m model) View() string {
 		rStyle = focusedBox
 	}
 
-	// [수정] 왼쪽: 로그 기록 박스 (Matches)
 	pageSize := m.tailPanelHeight
 	totalLogs := len(m.tailItems)
 	totalPages := (totalLogs + pageSize - 1) / maxInt(1, pageSize)
@@ -321,14 +342,29 @@ func (m model) View() string {
 	tailContent := strings.Join(m.renderTailLines(pageSize), "\n")
 	tailBox := rStyle.Width(leftW).Height(m.panelHeight).Render(cTitle.Render(tailTitle) + "\n" + tailContent)
 
-	// [수정] 오른쪽: 파일 목록 박스 (Files)
 	tableBox := tStyle.Width(rightW).Height(m.panelHeight).Render(cTitle.Render("Files") + "\n" + m.tab.View())
 
-	// [수정] 가로로 합칠 때 순서 변경 (로그 박스 먼저)
 	row := lipgloss.JoinHorizontal(lipgloss.Top, tailBox, " ", tableBox)
-	hint := keyHint.Render("Tab: Focus | Arrows: Page/Select | F: Follow | P: Pause | Q: Quit")
+	hint := keyHint.Render("Enter: Full Detail | Tab: Focus | Arrows: Page/Select | F: Follow | Q: Quit")
 
-	return joinLines(top, "", row, "", hint)
+	mainView := joinLines(top, "", row, "", hint)
+
+	// [추가] 상세 보기 팝업 렌더링
+	if m.showDetail && len(m.tailItems) > 0 {
+		selectedLog := m.tailItems[m.tailSelectedIndex].Text
+		// 팝업 가로 길이를 전체 화면의 80%로 설정
+		modalWidth := int(float64(m.width) * 0.8)
+		detailView := modalBox.Width(modalWidth).Render(
+			cTitle.Render("--- FULL LOG DETAIL ---") + "\n\n" +
+				lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Render(selectedLog) + "\n\n" +
+				keyHint.Render("Press Enter or Esc to close"),
+		)
+
+		// 화면 정중앙에 배치 (단순 조인으로 처리)
+		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, detailView)
+	}
+
+	return mainView
 }
 
 func (m model) renderTailLines(height int) []string {
@@ -346,6 +382,7 @@ func (m model) renderTailLines(height int) []string {
 		for i := start; i < end; i++ {
 			it := m.tailItems[i]
 			lineText := it.Text
+			// 목록에서는 텍스트를 자르지만, 상세 보기에서는 전문을 보여줄 예정
 			if len(lineText) > m.tailPanelWidth {
 				lineText = lineText[:m.tailPanelWidth-3] + "..."
 			}
