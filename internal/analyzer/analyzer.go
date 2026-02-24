@@ -2,11 +2,16 @@ package analyzer
 
 import (
 	"bufio"
+	"bytes"
+	"encoding/json"
+	"net/http"
 	"os"
 	"regexp"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/joho/godotenv"
 )
 
 type PauseController struct {
@@ -15,8 +20,31 @@ type PauseController struct {
 	ch     chan struct{} // resume 시 close
 }
 
+type DiscordMessage struct {
+	Content string `json:"content"`
+}
+
 func NewPauseController() *PauseController {
 	return &PauseController{ch: make(chan struct{})}
+}
+
+// sendDiscordAlert는 지정된 웹후크 URL로 메시지를 전송합니다.
+func sendDiscordAlert(webhookURL, message string) {
+	if webhookURL == "YOUR_WEBHOOK_URL_HERE" || webhookURL == "" {
+		return // URL이 설정되지 않았으면 전송하지 않음
+	}
+
+	msg := DiscordMessage{Content: "🚨 **보안 경고 탐지!**\n" + message}
+	payload, _ := json.Marshal(msg)
+
+	req, _ := http.NewRequest("POST", webhookURL, bytes.NewBuffer(payload))
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err == nil {
+		defer resp.Body.Close()
+	}
 }
 
 func (p *PauseController) SetPaused(v bool) {
@@ -46,7 +74,7 @@ func (p *PauseController) WaitIfPaused() {
 	<-ch
 }
 
-// Start: 워커풀 + Totals ticker(select로 종료) + MatchLine Seq 보장 + pauseFn 반환
+// Start: 워커풀 + Totals ticker + MatchLine Seq 보장 + pauseFn 반환
 func Start(files []string, re *regexp.Regexp, concurrent int) (<-chan Event, func(bool)) {
 	out := make(chan Event, 256)
 	pc := NewPauseController()
@@ -60,7 +88,6 @@ func Start(files []string, re *regexp.Regexp, concurrent int) (<-chan Event, fun
 		var matchesTotal int64
 		var seq uint64
 
-		// 초기 totals
 		out <- Totals{FilesTotal: len(files)}
 
 		jobs := make(chan string)
@@ -129,6 +156,10 @@ func Start(files []string, re *regexp.Regexp, concurrent int) (<-chan Event, fun
 }
 
 func scanFileOnce(path string, re *regexp.Regexp, out chan<- Event, pc *PauseController, seq *uint64) (int64, int64, error) {
+	// ⚠️ 여기에 본인의 디스코드 웹후크 URL을 입력하세요.
+	godotenv.Load()
+	webhookURL := os.Getenv("DISCORD_WEBHOOK_URL")
+
 	f, err := os.Open(path)
 	if err != nil {
 		return 0, 0, err
@@ -152,6 +183,11 @@ func scanFileOnce(path string, re *regexp.Regexp, out chan<- Event, pc *PauseCon
 			matches++
 			id := atomic.AddUint64(seq, 1)
 			out <- MatchLine{Seq: id, File: path, Line: txt}
+
+			// 매칭 발견 시 디스코드로 비동기 알림 전송
+			if webhookURL != "YOUR_WEBHOOK_URL_HERE" {
+				go sendDiscordAlert(webhookURL, "📂 파일: `"+path+"` \n🔍 탐지 로그: `"+txt+"`")
+			}
 		}
 	}
 
