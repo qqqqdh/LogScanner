@@ -4,3 +4,5 @@ INFO  cache warmed
 ERROR database failed
 INFO  retrying connection
 WARN  slow query again
+WARN  slow query again
+WARN  GET /점심
